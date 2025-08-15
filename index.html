@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Airfoil Shape Reconstruction - Interactive Demonstration</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link rel="stylesheet" href="assets/styles.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css" integrity="sha512-SnH5WK+bZxgPHs44uWIX+LLJAJ9/2PkPKZ5QiAj6Ta86w+fsb2TkcmfRyVX3pBnMFcV7oQPJkl9QevSCWr3W6A==" crossorigin="anonymous" referrerpolicy="no-referrer" />
+</head>
+<body class="bg-white">
+  <div class="container py-4">
+    <header class="mb-4 text-center">
+      <h1 class="fw-bold">Airfoil Shape Reconstruction via Reinforcement Learning</h1>
+      <hr>
+      <p>Sangjoon Lee<br>(<i class="fab fa-github"></i> <a href="https://github.com/jun9303" target="_blank" rel="noopener noreferrer">https://github.com/jun9303</a>)</p>
+      <figure class="figure text-center">
+        <img src="RLScheme.png" alt="Reinforcement Learning Airfoil Generation Scheme" class="figure-img img-fluid mx-auto d-block mb-3" style="max-width: 600px;">
+          <p style="color:gray;"><small>Lee &amp; Sheikh, 2025, <i>Journal of Computational Design and Engineering</i>, Submitted.</small></p>
+        <figcaption class="figure-caption text-start">
+          The above diagram illustrates the <em>reinforcement learning (RL) framework (stable-baselines3)</em> used for this interactive demonstration. An agent, acting as an <strong>'unbiased machine designer'</strong>, learns to generate airfoil shapes by manipulating a set of normalized "0-to-1 knobs" (design variables). It operates on a <strong>black-box</strong> generator, meaning it has no prior knowledge of the internal parameterization method (e.g., Design-by-Morphing, PARSEC, NURBS, CST). The agent's "guess" is compared to the target airfoil, and a reward based on similarity is returned, allowing it to improve its performance over successive episodes.
+        </figcaption>
+      </figure>
+      <hr>
+    </header>
+    <div class="card mb-4 shadow-sm">
+      <div class="card-body">
+        <div class="row g-3 align-items-end controls-row">
+          <div class="col-md-4">
+            <label for="airfoilSelect" class="form-label fw-medium">Target Airfoil:</label>
+            <select id="airfoilSelect" class="form-select" disabled>
+              <option value="..." selected disabled>Loading data...</option>
+            </select>
+          </div>
+          <div class="col-md-4">
+            <label for="methodSelect" class="form-label fw-medium">Parameterization Method:</label>
+            <select id="methodSelect" class="form-select" disabled>
+              <option value="..." selected disabled>Select an airfoil first</option>
+            </select>
+          </div>
+          <div class="col-md-4 d-flex justify-content-md-end gap-2">
+            <button id="playBtn" class="btn btn-success" disabled>Play</button>
+            <button id="stopBtn" class="btn btn-danger" disabled>Stop</button>
+            <button id="resetBtn" class="btn btn-secondary" disabled>Reset</button>
+            <button id="endBtn" class="btn btn-primary" disabled>Final</button>
+          </div>
+        </div>
+        <div class="row mt-3 align-items-center">
+          <div class="col">
+            <input type="range" id="frameSlider" class="form-range" min="0" value="0" disabled>
+          </div>
+          <div class="col-auto">
+            <span id="frameLabel" class="fw-medium text-muted">Step: 0 / 10000</span>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card shadow-sm">
+      <div id="canvasContainer"> 
+        <canvas id="canvas"></canvas>
+        <div id="placeholder"></div>
+      </div>
+    </div>
+    <div id="methodDescription" class="mt-4 p-3 bg-white border rounded shadow-sm" style="display: none;">
+    </div>
+  </div>
+  <script>
+    document.addEventListener("DOMContentLoaded", () => {
+      // --- Config ---
+      const FRAME_COUNT = 401;
+      const DURATION_MS = 20000;
+      const STEP_INTERVAL = 25;
+      const TOTAL_STEPS = (FRAME_COUNT - 1) * STEP_INTERVAL;
+      // --- DOM Elements ---
+      const airfoilSelect = document.getElementById("airfoilSelect");
+      const methodSelect = document.getElementById("methodSelect");
+      const playBtn = document.getElementById("playBtn");
+      const stopBtn = document.getElementById("stopBtn");
+      const resetBtn = document.getElementById("resetBtn");
+      const endBtn = document.getElementById("endBtn");
+      const frameSlider = document.getElementById("frameSlider");
+      const frameLabel = document.getElementById("frameLabel");
+      const canvas = document.getElementById("canvas");
+      const ctx = canvas.getContext("2d");
+      const placeholder = document.getElementById("placeholder");
+      const descriptionBox = document.getElementById("methodDescription");
+      const canvasContainer = document.getElementById("canvasContainer");
+      // --- State & Data ---
+      let siteData = {};
+      let imageCache = new Map();
+      let isDataReady = false;
+      let animationFrameId = null;
+      let startTime = 0;
+      const methodDescriptions = {
+        'Design-by-Morphing': '<h5>Design-by-Morphing (AirDbM) Parameterization (12 design variables)</h5><p>This method uses 12 baseline airfoils systematically chosen from the <a href="https://m-selig.ae.illinois.edu/ads/coord_database.html" target="_blank" rel="noopener noreferrer">UIUC database</a>. New shapes are generated by applying a morphing weight factor (w) to each baseline, along with proper normalization and geometric feasibility (i.e., self-intersection) correction.</p><ul><li><b>w<sub>i</sub></b>: Morphing weight factors &isin; [-1.0, 1.0] for i = 1 to 12</li></ul><p><b>Baselines Used:</b> <em>Eppler E195, Wortman FX 79-W-660A, Gottingen 531, Eppler 864 Strut, Roncz R1145MSM VariEze Canard Main, UIUC Chen, Griffith 30% Suction, Selig S9104, Althaus AH 93-W-480B, Althaus AH 81-K-144 W-F KLAPPE, Eppler E664 (Extended), Saratov R/C Sailplane.</em></p>',
+        'Hicks-Henne': '<h5>Hicks-Henne Parameterization (12 design variables)</h5><p>This method modifies a base airfoil by adding "bump" functions at specific locations.</p><ul><li><b>p<sub>u,i</sub></b>: Upper bump powers &isin; [1.0, 4.0] (i=1,2,3)</li><li><b>a<sub>u,i</sub></b>: Upper bump amplitudes &isin; [-0.2, 0.2] (i=1,2,3)</li><li><b>p<sub>l,i</sub></b>: Lower bump powers &isin; [1.0, 4.0] (i=1,2,3)</li><li><b>a<sub>l,i</sub></b>: Lower bump amplitudes &isin; [-0.2, 0.2] (i=1,2,3)</li></ul><p><em>Note: Uses cosine-distributed bump peak locations.</em></p>',
+        'Kulfan (CST)': '<h5>Kulfan\'s Class-Shape Transformation (CST) Parameterization (12 design variables)</h5><p>CST uses Bernstein polynomials to define the airfoil\'s upper and lower surfaces.</p><ul><li><b>N<sub>1</sub>, N<sub>2</sub></b>: Class function exponents &isin; (0.0, 2.0]</li><li><b>A<sub>u,i</sub>, A<sub>l,i</sub></b>: Upper and Lower Bernstein coefficients &isin; [-0.5, 0.5] (i=1-4)</li><li><b>&Delta;&xi;<sub>u</sub>, &Delta;&xi;<sub>l</sub></b>: Upper and Lower trailing edge heights &isin; [-0.5, 0.5]</li></ul>',
+        'NURBS': '<h5>NURBS Parameterization (13 design variables)</h5><p>Non-Uniform Rational B-Splines define the airfoil shape using weighted control points.</p><ul><li><b>x, y coords</b>: Control point coordinates</li><li><b>&omega;<sub>i</sub></b>: Control point weights &isin; [0.1, 5.0] (i=1-5)</li><li><b>y<sub>te,u</sub>, y<sub>te,l</sub></b>: Upper and Lower trailing edge heights</li></ul><p><em>Note: Uses a 3rd-order B-spline with evenly distributed knots.</em></p>',
+        'PARSEC': '<h5>PARSEC Parameterization (12 design variables)</h5><p>This method defines an airfoil using direct geometric parameters like leading edge radius, crest position, and curvature.</p><ul><li><b>r<sub>le,u/l</sub></b>: Upper/Lower leading edge radius</li><li><b>x<sub>u/l</sub>, y<sub>u/l</sub></b>: Upper/Lower crest coordinates</li><li><b>y<sub>xx,u/l</sub></b>: Upper/Lower crest curvature</li><li><b>y<sub>te</sub>, t<sub>te</sub></b>: Trailing edge position and thickness</li><li><b>&alpha;<sub>te</sub>, &beta;<sub>te</sub></b>: Trailing edge direction and wedge angle</li></ul>'
+      };
+      
+      // --- UI & Canvas Functions ---
+      const showPlaceholder = (text) => {
+        placeholder.textContent = text;
+        placeholder.style.display = "flex";
+      };
+      const hidePlaceholder = () => {
+        placeholder.style.display = "none";
+      };
+      const updateDescriptionBox = (method) => {
+        let content = "";
+        if (method && methodDescriptions[method]) {
+          content = methodDescriptions[method];
+          content += `\n<div class="text-center mt-3"><hr>\n <h6>Learning Improvement Curve</h6>  <img src="AirfoilGenComp.png" alt="Comparison across methodologies" style="max-width:600px; height:auto; border:1px solid #ddd;" />\n  <p class="mt-2 text-muted"><small>The plot illustrates the 'Learning Improvement Curve' of the RL machine designer for airfoil shape generation, comparing AirDbM (Design-by-Morphing) with Hicks-Henne, Kulfan Class-Shape Transformation (CST), NURBS, and PARSEC parameterization methods. AirDbM demonstrates the fastest convergence to low mean absolute error/difference (MAE/MAD) over cumulative episodes across all 1,644 target airfoil shapes, highlighting superior adaptability and learning efficiency among the methods evaluated. The solid line represents the average best MAE, and the shaded area corresponds to +/- 0.25 times the standard deviation.</small></p>\n</div>`;
+          descriptionBox.innerHTML = content;
+          descriptionBox.style.display = "block";
+        } else {
+          descriptionBox.style.display = "none";
+        }
+      };
+      
+      const resizeCanvas = () => {
+        const dpr = window.devicePixelRatio || 1;
+        const rect = canvas.getBoundingClientRect();
+        canvas.width = rect.width * dpr;
+        canvas.height = rect.height * dpr;
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        if (isDataReady) {
+            drawFrame(parseInt(frameSlider.value, 10));
+        }
+      };
+      const updateUIState = (state) => {
+        const selectionMade = airfoilSelect.value !== "..." && methodSelect.value !== "..." && methodSelect.value !== null;
+        const isPlaying = state === 'playing';
+        
+        playBtn.disabled = isPlaying || !selectionMade;
+        stopBtn.disabled = !isPlaying;
+        resetBtn.disabled = isPlaying || !selectionMade;
+        endBtn.disabled = isPlaying || !selectionMade;
+        frameSlider.disabled = isPlaying || !selectionMade;
+        airfoilSelect.disabled = isPlaying;
+        methodSelect.disabled = isPlaying || airfoilSelect.value === "...";
+      };
+      const loadImage = (src) => {
+        if (imageCache.has(src)) return Promise.resolve(imageCache.get(src));
+        return new Promise((resolve, reject) => {
+          const img = new Image();
+          img.onload = () => { imageCache.set(src, img); resolve(img); };
+          img.onerror = () => reject(`Failed to load image: ${src}`);
+          img.src = src;
+        });
+      };
+      const drawFrame = async (frameIndex) => {
+        if (isNaN(frameIndex) || !isDataReady) return;
+        
+        const aid = airfoilSelect.value;
+        const method = methodSelect.value;
+        
+        if (!aid || aid === "..." || !method || method === "..." || method === null) {
+          showPlaceholder("Select an airfoil and method to begin.");
+          updateDescriptionBox(null);
+          return;
+        }
+        
+        const frames = siteData[aid]?.[method];
+        if (!frames || !frames[frameIndex]) return;
+        try {
+          const img = await loadImage(frames[frameIndex]);
+          const rect = canvas.getBoundingClientRect();
+          hidePlaceholder();
+          ctx.clearRect(0, 0, rect.width, rect.height);
+          ctx.drawImage(img, 0, 0, rect.width, rect.height);
+          
+          frameSlider.value = frameIndex;
+          frameLabel.textContent = `Step: ${frameIndex * STEP_INTERVAL} / ${TOTAL_STEPS}`;
+          updateDescriptionBox(method);
+        } catch (error) {
+          console.error(error);
+          showPlaceholder("Error loading frame.");
+          updateDescriptionBox(null);
+        }
+      };
+      
+      // --- Animation & Control Logic (MODIFIED) ---
+      const animationLoop = (timestamp) => {
+        if (!startTime) startTime = timestamp;
+        const elapsedTime = timestamp - startTime;
+        const progress = Math.min(elapsedTime / DURATION_MS, 1);
+        const frameIndex = Math.floor(progress * (FRAME_COUNT - 1));
+        
+        if (parseInt(frameSlider.value, 10) !== frameIndex) {
+            drawFrame(frameIndex);
+        }
+        if (progress < 1) {
+          animationFrameId = requestAnimationFrame(animationLoop);
+        } else {
+          stop();
+        }
+      };
+      const play = () => {
+        if (animationFrameId) return; // Don't start if already playing
+        const canPlay = airfoilSelect.value !== "..." && methodSelect.value !== "..." && methodSelect.value !== null;
+        if (!canPlay) return;
+        updateUIState('playing');
+        const startFrame = parseInt(frameSlider.value, 10);
+        if (startFrame >= FRAME_COUNT - 1) {
+            frameSlider.value = 0; // Reset if at the end
+        }
+        startTime = performance.now() - (parseInt(frameSlider.value, 10) / (FRAME_COUNT - 1)) * DURATION_MS;
+        animationFrameId = requestAnimationFrame(animationLoop);
+        canvasContainer.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      };
+      const stop = () => {
+        cancelAnimationFrame(animationFrameId);
+        animationFrameId = null;
+        updateUIState('stopped');
+      };
+      
+      const reset = () => {
+        stop();
+        frameSlider.value = 0;
+        drawFrame(0);
+        updateUIState('stopped');
+      };
+      const goToEnd = () => {
+          stop();
+          frameSlider.value = FRAME_COUNT - 1;
+          drawFrame(FRAME_COUNT - 1);
+      };
+      const tryAutoPlay = () => {
+        const canPlay = airfoilSelect.value !== "..." && methodSelect.value !== "..." && methodSelect.value !== null;
+        if (canPlay) {
+            reset(); // Ensure it starts from step 0
+            play();
+        }
+      };
+      // --- UI Population ---
+      const populateAirfoils = () => {
+        airfoilSelect.innerHTML = '<option value="..." selected disabled>Select an airfoil...</option>';
+        Object.keys(siteData).sort((a, b) => a.localeCompare(b, undefined, {numeric: true})).forEach(aid => {
+          const airfoilName = siteData[aid]?.name || `Airfoil ${aid}`;
+          airfoilSelect.insertAdjacentHTML("beforeend", `<option value="${aid}">${airfoilName}</option>`);
+        });
+      };
+      
+      const populateMethods = () => {
+        const aid = airfoilSelect.value;
+        methodSelect.innerHTML = '<option value="..." selected disabled>Select a method...</option>';
+        if (aid === "...") {
+          methodSelect.disabled = true;
+          updateDescriptionBox(null);
+          return;
+        }
+        const methods = siteData[aid];
+        const methodKeys = Object.keys(methods).filter(key => key !== 'name');
+        methodKeys.sort().forEach(method => {
+          methodSelect.insertAdjacentHTML("beforeend", `<option value="${method}">${method}</option>`);
+        });
+        methodSelect.disabled = false;
+      };
+      // --- Event Listeners (MODIFIED) ---
+      airfoilSelect.addEventListener("change", () => {
+        stop();
+        populateMethods();
+        drawFrame(0);
+        updateUIState('stopped');
+        tryAutoPlay();
+      });
+      methodSelect.addEventListener("change", () => {
+        stop();
+        drawFrame(0);
+        updateUIState('stopped');
+        tryAutoPlay();
+      });
+      playBtn.addEventListener("click", play);
+      stopBtn.addEventListener("click", stop);
+      resetBtn.addEventListener("click", reset);
+      endBtn.addEventListener("click", goToEnd);
+      frameSlider.addEventListener("input", (e) => {
+        stop();
+        drawFrame(parseInt(e.target.value, 10));
+      });
+      window.addEventListener("resize", resizeCanvas);
+      // --- Initialization ---
+      const initialize = async () => {
+        try {
+          showPlaceholder("Loading data...");
+          const response = await fetch("site_data.json", { cache: "no-store" });
+          if (!response.ok) throw new Error(`HTTP error! Status: ${response.status}`);
+          siteData = await response.json();
+          
+          isDataReady = true;
+          frameSlider.max = FRAME_COUNT - 1;
+          populateAirfoils();
+          airfoilSelect.disabled = false;
+          
+          resizeCanvas();
+          updateUIState('initial');
+          showPlaceholder("Select an airfoil and method to begin.");
+          updateDescriptionBox(null);
+        } catch (error) {
+          console.error("Initialization failed:", error);
+          showPlaceholder("Error: Could not load site data.");
+          updateDescriptionBox(null);
+        }
+      };
+      initialize();
+    });
+  </script>
+</body>
+</html>
